@@ -114,6 +114,7 @@ static memdb_change_t memdb_change_array[] = {
 	{ .path = "firewall/cluster.fw" },
 	{ .path = "mapping/pci.cfg" },
 	{ .path = "mapping/usb.cfg" },
+	{ .path = "ceph/ceph.conf" },
 };
 
 static GMutex mutex;

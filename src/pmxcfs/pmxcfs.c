@@ -93,6 +93,31 @@ static gboolean write_pidfile(pid_t pid)
 	return res;
 }
 
+static char *
+dereference_path(const char *path)
+{
+        char *deref_path = NULL;
+        const char* orig_path = path;
+
+        while(*path == '/') path++;
+
+        if ((strncmp(path, "ceph", 4) == 0) && (path[4] == '/')) {
+                path += 4;
+                while(*path == '/') path++;
+
+                if ((strncmp(path, "ceph.conf", 9) == 0) && (path[9] == 0)) {
+                        deref_path = g_strdup("/ceph.conf");
+                }
+        }
+
+        if (deref_path != NULL) {
+            cfs_debug("dereference_path %s -> %s", orig_path, deref_path);
+        } else {
+            deref_path = g_strdup(orig_path);
+        }
+        return deref_path;
+}
+
 static cfs_plug_t *find_plug(const char *path, char **sub)
 {
 	g_return_val_if_fail(root_plug != NULL, NULL);
@@ -129,14 +154,19 @@ static int cfs_fuse_getattr(const char *path, struct stat *stbuf)
 	int ret = -EACCES;
 
 	char *subpath = NULL;
-	cfs_plug_t *plug = find_plug(path, &subpath);
+	char *deref_path = dereference_path(path);
+	cfs_plug_t *plug = find_plug(deref_path, &subpath);
 
 	if (plug && plug->ops && plug->ops->getattr) {
 		ret = plug->ops->getattr(plug, subpath ? subpath : "", stbuf);
 
-		stbuf->st_gid = cfs.gid;
+		if (path_is_ceph_private(path)) {
+			stbuf->st_gid = cfs.ceph_gid;
+		} else {
+			stbuf->st_gid = cfs.gid;
+		}
 
-		if (path_is_private(path)) {
+		if (path_is_private(deref_path)) {
 			stbuf->st_mode &= 0777700;
 		} else {
 			if (S_ISDIR(stbuf->st_mode) || S_ISLNK(stbuf->st_mode)) {
@@ -151,6 +181,8 @@ static int cfs_fuse_getattr(const char *path, struct stat *stbuf)
 
 	if (subpath)
 		g_free(subpath);
+	if (deref_path)
+		g_free(deref_path);
 
 	return ret;
 
@@ -167,7 +199,8 @@ static int cfs_fuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	int ret = -EACCES;
 
 	char *subpath = NULL;
-	cfs_plug_t *plug = find_plug(path, &subpath);
+	char *deref_path = dereference_path(path);
+	cfs_plug_t *plug = find_plug(deref_path, &subpath);
 
 	if (!plug)
 		goto ret;
@@ -179,6 +212,8 @@ ret:
 
 	if (subpath)
 		g_free(subpath);
+	if (deref_path)
+		g_free(deref_path);
 
 	return ret;
 }
@@ -190,7 +225,8 @@ static int cfs_fuse_chmod(const char *path, mode_t mode)
 	cfs_debug("enter cfs_fuse_chmod %s", path);
 
 	mode_t allowed_mode = (S_IRUSR | S_IWUSR);
-	if (!path_is_private(path))
+	char *deref_path = dereference_path(path);
+	if (!path_is_private(deref_path) && !path_is_ceph_private(deref_path))
 		allowed_mode |= (S_IRGRP);
 
 	// allow only setting our supported modes (0600 for priv, 0640 for rest)
@@ -199,6 +235,9 @@ static int cfs_fuse_chmod(const char *path, mode_t mode)
 		ret = 0;
 
 	cfs_debug("leave cfs_fuse_chmod %s (%d) mode: %o", path, ret, (int)mode);
+
+	if (deref_path)
+		g_free(deref_path);
 
 	return ret;
 }
@@ -210,8 +249,14 @@ static int cfs_fuse_chown(const char *path, uid_t user, gid_t group)
 	cfs_debug("enter cfs_fuse_chown %s", path);
 
 	// we get -1 if no change should be made
-	if ((user == 0 || user == -1) && (group == cfs.gid || group == -1))
-		ret = 0;
+
+	if (path_is_ceph_private(path)) {
+		if ((user == 0 || user == -1) && (group == cfs.ceph_gid || group == -1))
+			ret = 0;
+	} else {
+		if ((user == 0 || user == -1) && (group == cfs.gid || group == -1))
+			ret = 0;
+	}
 
 	cfs_debug("leave cfs_fuse_chown %s (%d) (uid: %d; gid: %d)", path, ret, user, group);
 
@@ -225,7 +270,8 @@ static int cfs_fuse_mkdir(const char *path, mode_t mode)
 	int ret = -EACCES;
 
 	char *subpath = NULL;
-	cfs_plug_t *plug = find_plug(path, &subpath);
+	char *deref_path = dereference_path(path);
+	cfs_plug_t *plug = find_plug(deref_path, &subpath);
 
 	if (!plug)
 		goto ret;
@@ -238,6 +284,8 @@ static int cfs_fuse_mkdir(const char *path, mode_t mode)
 
 	if (subpath)
 		g_free(subpath);
+	if (deref_path)
+		g_free(deref_path);
 
 	return ret;
 }
@@ -249,7 +297,8 @@ static int cfs_fuse_rmdir(const char *path)
 	int ret = -EACCES;
 
 	char *subpath = NULL;
-	cfs_plug_t *plug = find_plug(path, &subpath);
+	char *deref_path = dereference_path(path);
+	cfs_plug_t *plug = find_plug(deref_path, &subpath);
 
 	if (!plug)
 		goto ret;
@@ -262,6 +311,8 @@ static int cfs_fuse_rmdir(const char *path)
 
 	if (subpath)
 		g_free(subpath);
+	if (deref_path)
+		g_free(deref_path);
 
 	return ret;
 }
@@ -273,10 +324,12 @@ static int cfs_fuse_rename(const char *from, const char *to)
 	int ret = -EACCES;
 
 	char *sub_from = NULL;
-	cfs_plug_t *plug_from = find_plug(from, &sub_from);
+	char *deref_from = dereference_path(from);
+	cfs_plug_t *plug_from = find_plug(deref_from, &sub_from);
 
 	char *sub_to = NULL;
-	cfs_plug_t *plug_to = find_plug(to, &sub_to);
+	char *deref_to = dereference_path(to);
+	cfs_plug_t *plug_to = find_plug(deref_to, &sub_to);
 
 	if (!plug_from || !plug_to || plug_from != plug_to)
 		goto ret;
@@ -289,9 +342,13 @@ static int cfs_fuse_rename(const char *from, const char *to)
 
 	if (sub_from)
 		g_free(sub_from);
+	if (deref_from)
+		g_free(deref_from);
 
 	if (sub_to)
 		g_free(sub_to);
+	if (deref_to)
+		g_free(deref_to);
 
 	return ret;
 }
@@ -306,7 +363,10 @@ static int cfs_fuse_open(const char *path, struct fuse_file_info *fi)
 	int ret = -EACCES;
 
 	char *subpath = NULL;
-	cfs_plug_t *plug = find_plug(path, &subpath);
+	char *deref_path = dereference_path(path);
+	cfs_plug_t *plug = find_plug(deref_path, &subpath);
+
+	cfs_debug("cfs_fuse_open subpath %s", subpath);
 
 	if (plug && plug->ops) {
 		if ((subpath || !plug->ops->readdir) && plug->ops->open) {
@@ -314,10 +374,12 @@ static int cfs_fuse_open(const char *path, struct fuse_file_info *fi)
 		}
 	}
 
-	cfs_debug("leave cfs_fuse_open %s (%d)", path, ret);
+	cfs_debug("leave cfs_fuse_open %s -> %s (%d)", path, deref_path, ret);
 
 	if (subpath)
 		g_free(subpath);
+	if (deref_path)
+		g_free(deref_path);
 
 	return ret;
 }
@@ -332,7 +394,8 @@ static int cfs_fuse_read(const char *path, char *buf, size_t size, off_t offset,
 	int ret = -EACCES;
 
 	char *subpath = NULL;
-	cfs_plug_t *plug = find_plug(path, &subpath);
+	char *deref_path = dereference_path(path);
+	cfs_plug_t *plug = find_plug(deref_path, &subpath);
 
 	if (plug && plug->ops) {
 		if ((subpath || !plug->ops->readdir) && plug->ops->read)
@@ -343,6 +406,8 @@ static int cfs_fuse_read(const char *path, char *buf, size_t size, off_t offset,
 
 	if (subpath)
 		g_free(subpath);
+	if (deref_path)
+		g_free(deref_path);
 
 	return ret;
 }
@@ -357,7 +422,8 @@ static int cfs_fuse_write(const char *path, const char *buf, size_t size,
 	int ret = -EACCES;
 
 	char *subpath = NULL;
-	cfs_plug_t *plug = find_plug(path, &subpath);
+	char *deref_path = dereference_path(path);
+	cfs_plug_t *plug = find_plug(deref_path, &subpath);
 
 	if (plug && plug->ops) {
 		if ((subpath || !plug->ops->readdir) && plug->ops->write)
@@ -369,6 +435,8 @@ static int cfs_fuse_write(const char *path, const char *buf, size_t size,
 
 	if (subpath)
 		g_free(subpath);
+	if (deref_path)
+		g_free(deref_path);
 
 	return ret;
 }
@@ -380,7 +448,8 @@ static int cfs_fuse_truncate(const char *path, off_t size)
 	int ret = -EACCES;
 
 	char *subpath = NULL;
-	cfs_plug_t *plug = find_plug(path, &subpath);
+	char *deref_path = dereference_path(path);
+	cfs_plug_t *plug = find_plug(deref_path, &subpath);
 
 	if (plug && plug->ops) {
 		if ((subpath || !plug->ops->readdir) && plug->ops->truncate)
@@ -391,6 +460,8 @@ static int cfs_fuse_truncate(const char *path, off_t size)
 
 	if (subpath)
 		g_free(subpath);
+	if (deref_path)
+		g_free(deref_path);
 
 	return ret;
 }
@@ -402,7 +473,8 @@ static int cfs_fuse_create(const char *path, mode_t mode, struct fuse_file_info 
 	int ret = -EACCES;
 
 	char *subpath = NULL;
-	cfs_plug_t *plug = find_plug(path, &subpath);
+	char *deref_path = dereference_path(path);
+	cfs_plug_t *plug = find_plug(deref_path, &subpath);
 
 	if (!plug)
 		goto ret;
@@ -415,6 +487,8 @@ ret:
 
 	if (subpath)
 		g_free(subpath);
+	if (deref_path)
+		g_free(deref_path);
 
 	return ret;
 }
@@ -426,7 +500,8 @@ static int cfs_fuse_unlink(const char *path)
 	int ret = -EACCES;
 
 	char *subpath = NULL;
-	cfs_plug_t *plug = find_plug(path, &subpath);
+	char *deref_path = dereference_path(path);
+	cfs_plug_t *plug = find_plug(deref_path, &subpath);
 
 	if (!plug)
 		goto ret;
@@ -439,6 +514,8 @@ ret:
 
 	if (subpath)
 		g_free(subpath);
+	if (deref_path)
+		g_free(deref_path);
 
 	return ret;
 }
@@ -450,7 +527,8 @@ static int cfs_fuse_readlink(const char *path, char *buf, size_t max)
 	int ret = -EACCES;
 
 	char *subpath = NULL;
-	cfs_plug_t *plug = find_plug(path, &subpath);
+	char *deref_path = dereference_path(path);
+	cfs_plug_t *plug = find_plug(deref_path, &subpath);
 
 	if (!plug)
 		goto ret;
@@ -463,6 +541,8 @@ ret:
 
 	if (subpath)
 		g_free(subpath);
+	if (deref_path)
+		g_free(deref_path);
 
 	return ret;
 }
@@ -474,7 +554,8 @@ static int cfs_fuse_utimens(const char *path, const struct timespec tv[2])
 	int ret = -EACCES;
 
 	char *subpath = NULL;
-	cfs_plug_t *plug = find_plug(path, &subpath);
+	char *deref_path = dereference_path(path);
+	cfs_plug_t *plug = find_plug(deref_path, &subpath);
 
 	if (!plug)
 		goto ret;
@@ -487,6 +568,8 @@ ret:
 
 	if (subpath)
 		g_free(subpath);
+	if (deref_path)
+		g_free(deref_path);
 
 	return ret;
 }
@@ -865,6 +948,14 @@ int main(int argc, char *argv[])
 		exit (-1);
 	}
 	cfs.gid = www_data->gr_gid;
+
+	struct group *ceph = getgrnam("ceph");
+	if (!ceph) {
+		cfs_message("Unable to get ceph group ID (falling back to www-data)");
+		cfs.ceph_gid = cfs.gid;
+	} else {
+		cfs.ceph_gid = ceph->gr_gid;
+	}
 
 	umask(027);
 

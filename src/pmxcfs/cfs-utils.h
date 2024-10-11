@@ -41,6 +41,7 @@ typedef struct {
 	char *nodename;
 	char *ip;
 	gid_t gid;
+	gid_t ceph_gid;
 	int debug;
 } cfs_t;
 
@@ -112,6 +113,9 @@ atomic_write_file(
 
 gboolean
 path_is_private(const char *path);
+
+gboolean
+path_is_ceph_private(const char *path);
 
 gboolean
 path_is_lxc_conf(const char *path);

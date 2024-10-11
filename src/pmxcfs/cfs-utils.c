@@ -304,6 +304,17 @@ path_is_private(const char *path)
 }
 
 gboolean
+path_is_ceph_private(const char *path)
+{
+	while (*path == '/') path++;
+
+	if ((strncmp(path, "ceph", 4) == 0) && (path[4] == 0 || path[4] == '/')) {
+		return TRUE;
+	}
+	return FALSE;
+}
+
+gboolean
 path_is_lxc_conf(const char *path)
 {
 	while (*path == '/') path++;
